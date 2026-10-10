@@ -1294,7 +1294,6 @@ describe("App console", () => {
     await screen.findByLabelText("远控画面视频");
     expect(screen.queryByLabelText("远控视频 2")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "画面源" })).toBeInTheDocument();
-    expect(screen.getByText(/2 路视频/)).toBeInTheDocument();
   });
 });
 

@@ -98,6 +98,11 @@ const REMOTE_ASSISTANCE_DEFAULT_TARGET_PLATFORM = 1;
 // 需要“按住保持”的修饰键(用于组合键);其余键采用瞬时一击。event.key 取值见 KeyboardEvent.key 规范。
 const HOLD_MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph"]);
 
+// Super(Win)键的 event.key 取值（"OS" 是旧浏览器的取值）。
+function isSuperKey(key: string): boolean {
+  return key === "Meta" || key === "OS";
+}
+
 function readAutoConnectPref(): boolean {
   try {
     return globalThis.localStorage?.getItem("uurc.autoConnect") !== "false";
@@ -181,6 +186,9 @@ export function useRemoteControlController() {
   const autoConnectAttemptedDeviceRef = useRef<string>("");
   const controlChannelOpenedRef = useRef(false);
   const activePointerId = useRef<number | null>(null);
+  // 本地跟踪的 Super(Win)按下状态：部分平台（如 Windows Chrome）wheel 事件的 metaKey
+  // 修改键标志不可靠，需要用 keydown/keyup 自行记录，供“Super+滚轮不透传”判断使用。
+  const superKeyHeldRef = useRef(false);
   const navigate = useNavigate();
   const controlRouteMatch = useMatch("/devices/:deviceId/control");
   const routeSelectedDeviceId = controlRouteMatch?.params.deviceId ?? "";
@@ -812,7 +820,7 @@ export function useRemoteControlController() {
   function handleSendClipboardText() {
     if (!clipboardText.trim() || !browserRemoteSession.current) return;
     try {
-      browserRemoteSession.current.sendTextData(clipboardText);
+      browserRemoteSession.current.sendClipboardText(clipboardText);
       setClipboardStatus(`已发送 ${clipboardText.length} 字符到远端`);
       showToast("已发送剪贴板到远端");
       if (browserRemoteSession.current) setBrowserRemoteState(browserRemoteSession.current.getState());
@@ -916,9 +924,15 @@ export function useRemoteControlController() {
 
   function handleRemoteStageWheel(event: WheelEvent<HTMLDivElement>) {
     if (!inputControlActive || !browserRemoteSession.current) return;
+    // Super(Win)/Cmd + 滚轮是主控端本机的切换桌面快捷键，直接放行不透传给被控端。
+    // metaKey 在部分平台(Windows Chrome)的 wheel 事件上不可靠，需叠加本地 keydown/keyup 跟踪。
+    // 页面滚动仍由 stage 上的非被动监听 lockPageScroll 拦截，不影响系统快捷键生效。
+    if (event.metaKey || superKeyHeldRef.current) return;
     event.preventDefault();
     try {
-      browserRemoteSession.current.sendMouseScroll({ deltaX: event.deltaX, deltaY: event.deltaY });
+      // 浏览器 WheelEvent 正值=向下/向右滚动，而被控端 scroll 的 delta 正方向与之相反，
+      // 这里取反后再发送，否则滚轮方向颠倒。
+      browserRemoteSession.current.sendMouseScroll({ deltaX: -event.deltaX, deltaY: -event.deltaY });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -937,6 +951,7 @@ export function useRemoteControlController() {
   function handleRemoteStageKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     // isComposing:本机输入法合成中不把候选键当普通按键(中文请用远端输入法或剪贴板粘贴)。
     if (!inputControlActive || !browserRemoteSession.current || event.nativeEvent.isComposing) return;
+    if (isSuperKey(event.key)) superKeyHeldRef.current = true;
     // Ctrl/Cmd+V 走“把本机剪贴板粘到远端”（onPaste 处理），不把 V 当普通按键发给远端，
     // 否则远端会再粘一次它自己的剪贴板。
     if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) return;
@@ -956,6 +971,7 @@ export function useRemoteControlController() {
 
   function handleRemoteStageKeyUp(event: KeyboardEvent<HTMLDivElement>) {
     if (!inputControlActive || !browserRemoteSession.current) return;
+    if (isSuperKey(event.key)) superKeyHeldRef.current = false;
     if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) return;
     // 只有修饰键是“按住”的，需在抬起时释放;普通键已在 keydown 即时抬起。
     if (!HOLD_MODIFIER_KEYS.has(event.key)) return;
@@ -971,17 +987,19 @@ export function useRemoteControlController() {
     // 失焦时把按住的键鼠全部抬起：Alt+Tab、右键菜单、系统快捷键会吞掉 keyup/pointerup，
     // 否则会在被控端留下卡住的按键（右键卡死、Alt 卡死等）。
     activePointerId.current = null;
+    // Super 键的 keyup 可能被系统(如开始菜单)吞掉，失焦时一并复位本地跟踪状态。
+    superKeyHeldRef.current = false;
     browserRemoteSession.current?.releaseAllInputs();
   }
 
   function handleRemoteStagePaste(event: ClipboardEvent<HTMLDivElement>) {
-    // 直接粘贴：Ctrl/Cmd+V 时把本机剪贴板文本经文本通道发到远端（无需打开剪贴板面板）。
+    // 直接粘贴：Ctrl/Cmd+V 时把本机剪贴板文本发到远端（无需打开剪贴板面板）。
     if (!inputControlActive || !browserRemoteSession.current) return;
     const text = event.clipboardData?.getData("text") ?? "";
     if (!text) return;
     event.preventDefault();
     try {
-      browserRemoteSession.current.sendTextData(text);
+      browserRemoteSession.current.sendClipboardText(text);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -1056,11 +1074,6 @@ export function useRemoteControlController() {
   const controlChannelLabel = formatDataChannelState(controlChannelState);
   const textChannelLabel = formatDataChannelState(textChannelState);
   const inputControlActive = inputControlEnabled && controlChannelState === "open";
-  const inputControlLabel = inputControlActive
-    ? "控制中"
-    : controlChannelState === "open"
-      ? "仅查看"
-      : controlChannelLabel;
   const decodeStalledPersisted =
     browserRemoteState.videoFlow?.status === "decode_stalled" && decodeStalledStreak >= 2;
   const browserConnectionRecoverable =
@@ -1081,7 +1094,9 @@ export function useRemoteControlController() {
       ? "自动重连已开启"
       : "自动重连已关闭";
   const canReadLocalClipboard = busy === null;
-  const canSendClipboardText = inputControlActive && textChannelState === "open" && clipboardText.trim().length > 0;
+  // 桌面被控端剪贴板走控制通道(text_input)，安卓走文本通道(RomMsg_Text)，任一通道可用即可发送。
+  const canSendClipboardText =
+    inputControlActive && clipboardText.trim().length > 0 && (textChannelState === "open" || controlChannelState === "open");
   const clipboardPreviewLabel = clipboardText.trim() ? `${clipboardText.length} 字符待发送` : "剪贴板内容未读取";
   const connectionQuality = getRemoteConnectionQuality({
     state: browserRemoteState,
@@ -1397,7 +1412,6 @@ export function useRemoteControlController() {
     iceControlStatusLabel,
     inboundVideoStatsLabel,
     inputControlActive,
-    inputControlLabel,
     joinModeLabel,
     networkSwitchSummary,
     nextAction,
@@ -1413,7 +1427,6 @@ export function useRemoteControlController() {
     remoteStageFrameRef,
     isFullscreen,
     remoteStageViewMode,
-    remoteVideoCount,
     remoteVideoSources,
     remoteVideoStreams,
     stageStatusLabel,

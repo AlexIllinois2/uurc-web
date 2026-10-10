@@ -57,24 +57,6 @@
   object-fit: contain;
 }
 
-.stage-badge {
-  position: absolute;
-  left: 12px;
-  bottom: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border-radius: 999px;
-  padding: 4px 10px;
-  color: rgba(255, 255, 255, 0.96);
-  background: rgba(10, 10, 10, 0.86);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
 .stage-grid {
   position: absolute;
   inset: 0;

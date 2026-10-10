@@ -57,7 +57,6 @@ export interface RemoteControlPageProps {
   iceControlStatusLabel: string;
   inboundVideoStatsLabel: string;
   inputControlActive: boolean;
-  inputControlLabel: string;
   joinModeLabel: string;
   networkSwitchSummary: string;
   nextAction: NextAction;
@@ -73,7 +72,6 @@ export interface RemoteControlPageProps {
   remoteStageFrameRef: RefObject<HTMLDivElement | null>;
   isFullscreen: boolean;
   remoteStageViewMode: RemoteStageViewMode;
-  remoteVideoCount: number;
   remoteVideoSources: RemoteVideoSourceInfo[];
   remoteVideoStreams: RemoteVideoStream[];
   stageStatusLabel: string;

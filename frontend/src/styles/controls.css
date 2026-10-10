@@ -40,6 +40,72 @@
   cursor: grabbing;
 }
 
+/* 工具栏贴边自动隐藏后，留在窗口边缘的半透明小半圆恢复按钮：
+   左右停靠为竖向半圆(箭头指向画面内)，上下停靠为横向半圆，沿边位置由 inline style 控制。 */
+.command-bar-dock-tab {
+  position: fixed;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 34px;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(24, 24, 27, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: background 0.15s ease, width 0.15s ease, height 0.15s ease;
+}
+
+.command-bar-dock-tab:hover,
+.command-bar-dock-tab:focus-visible {
+  width: 16px;
+  height: 40px;
+  color: #ffffff;
+  background: rgba(24, 24, 27, 0.72);
+}
+
+.command-bar-dock-tab.dock-tab-left {
+  left: 0;
+  border-left: none;
+  border-radius: 0 999px 999px 0;
+}
+
+.command-bar-dock-tab.dock-tab-right {
+  right: 0;
+  border-right: none;
+  border-radius: 999px 0 0 999px;
+}
+
+.command-bar-dock-tab.dock-tab-top,
+.command-bar-dock-tab.dock-tab-bottom {
+  width: 34px;
+  height: 14px;
+}
+
+.command-bar-dock-tab.dock-tab-top {
+  top: 0;
+  border-top: none;
+  border-radius: 0 0 999px 999px;
+}
+
+.command-bar-dock-tab.dock-tab-bottom {
+  bottom: 0;
+  border-bottom: none;
+  border-radius: 999px 999px 0 0;
+}
+
+.command-bar-dock-tab.dock-tab-top:hover,
+.command-bar-dock-tab.dock-tab-top:focus-visible,
+.command-bar-dock-tab.dock-tab-bottom:hover,
+.command-bar-dock-tab.dock-tab-bottom:focus-visible {
+  width: 40px;
+  height: 18px;
+}
+
 .connection-recovery-strip {
   flex: 0 1 320px;
   display: flex;

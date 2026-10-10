@@ -4,10 +4,8 @@ import type { RemoteControlPageProps } from "../app/remoteControlPageProps.js";
 import { RemoteVideoTile } from "./RemoteVideoTile.js";
 
 export function RemoteControlStage({
-  browserStageLabel,
   hasRemoteVideo,
   inputControlActive,
-  inputControlLabel,
   onRemoteStageKeyDown,
   onRemoteStageKeyUp,
   onRemoteStageBlur,
@@ -22,17 +20,13 @@ export function RemoteControlStage({
   primaryRemoteVideoId,
   remoteStageRef,
   remoteStageViewMode,
-  remoteVideoCount,
   remoteVideoStreams,
   selectedDevice,
   stageStatusLabel,
-  videoFlowLabel,
 }: Pick<
   RemoteControlPageProps,
-  | "browserStageLabel"
   | "hasRemoteVideo"
   | "inputControlActive"
-  | "inputControlLabel"
   | "onRemoteStageKeyDown"
   | "onRemoteStageKeyUp"
   | "onRemoteStageBlur"
@@ -47,11 +41,9 @@ export function RemoteControlStage({
   | "primaryRemoteVideoId"
   | "remoteStageRef"
   | "remoteStageViewMode"
-  | "remoteVideoCount"
   | "remoteVideoStreams"
   | "selectedDevice"
   | "stageStatusLabel"
-  | "videoFlowLabel"
 >) {
   return (
     <div
@@ -96,9 +88,6 @@ export function RemoteControlStage({
               <span>这一路当前没有画面输出，可在右侧「画面源」切换到其他画面。</span>
             </div>
           ) : null}
-          <div className="stage-badge">
-            {browserStageLabel} · {remoteVideoCount} 路视频 · {videoFlowLabel} · 输入 {inputControlLabel}
-          </div>
         </>
       ) : (
         <>

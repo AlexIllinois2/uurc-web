@@ -457,6 +457,20 @@ export class BrowserRemoteSession {
     });
   }
 
+  // 剪贴板文本按被控端平台路由：
+  // - 桌面被控端走控制通道裸 JSON text_input（与远端打字一致，真机抓包验证）；
+  //   TEXT_DATA_CHANNEL 上的 RomMsg_Text 二进制帧是安卓被控端协议，桌面端不解析，
+  //   控制桌面时走文本通道会导致剪贴板“发送成功但被控端无反应”。
+  // - 安卓/模拟器维持文本通道 RomMsg_Text。
+  sendClipboardText(text: string): void {
+    if (!text) return;
+    if (isDesktopPlatform(this.targetPlatform)) {
+      this.sendTextInput(text);
+      return;
+    }
+    this.sendTextData(text);
+  }
+
   sendMouseClick(input: BrowserRemoteMouseClickInput): void {
     const button = input.button ?? "primary";
     this.sendMouseMove(input);
@@ -951,7 +965,17 @@ export class BrowserRemoteSession {
 
   private decodeControlDataChannelMessage(data: unknown): DecodedStreamerControlMessage | undefined {
     const bytes = dataChannelPayloadBytes(data);
-    if (!bytes) return undefined;
+    if (!bytes) {
+      // 桌面被控端在控制通道上推的是字符串(如剪贴板 JSON)，当前协议解析只认 protobuf；
+      // 记录内容预览便于排查反向剪贴板等未接管的桌面消息。
+      if (typeof data === "string" && data.length > 0) {
+        this.recordDebugEvent("data_recv", "控制通道收到未解析的文本", {
+          charLength: data.length,
+          preview: data.length > 200 ? `${data.slice(0, 200)}...` : data,
+        });
+      }
+      return undefined;
+    }
     try {
       return decodeStreamerControlMessage(bytes);
     } catch (error) {
