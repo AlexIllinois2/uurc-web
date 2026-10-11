@@ -91,6 +91,7 @@ import {
   toRemoteMouseButton,
   toRemoteMousePosition,
 } from "../remote/remoteControlUiModel.js";
+import { toAndroidKeyCodeFromDomEvent } from "../remote/androidKeyCodes.js";
 import { useAutoLoadDevices } from "./useAutoLoadDevices.js";
 
 const REMOTE_ASSISTANCE_DEFAULT_TARGET_PLATFORM = 1;
@@ -102,6 +103,13 @@ const HOLD_MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph
 function isSuperKey(key: string): boolean {
   return key === "Meta" || key === "OS";
 }
+
+// Win 键短按判定阈值：松开时按住时长小于该值视为单击（转发按下+抬起，打开受控端开始菜单）；
+// 大于等于该值才松开多半是 Win+滚轮切桌面手势，整键丢弃。点按开始菜单的时长远短于该值。
+const SUPER_TAP_MAX_MS = 500;
+
+// Win 键缓冲状态：pending=已按下未转发；flushed=已因组合键补发按下（keyup 时需释放）。
+type SuperKeyBuffer = { phase: "pending" | "flushed"; code: string; key: string; downAt: number };
 
 function readAutoConnectPref(): boolean {
   try {
@@ -186,9 +194,15 @@ export function useRemoteControlController() {
   const autoConnectAttemptedDeviceRef = useRef<string>("");
   const controlChannelOpenedRef = useRef(false);
   const activePointerId = useRef<number | null>(null);
-  // 本地跟踪的 Super(Win)按下状态：部分平台（如 Windows Chrome）wheel 事件的 metaKey
-  // 修改键标志不可靠，需要用 keydown/keyup 自行记录，供“Super+滚轮不透传”判断使用。
+  // 全局跟踪的 Super(Win)按下状态：wheel 事件的 metaKey 修改键标志在部分平台(Windows Chrome)
+  // 不可靠，且键盘事件只有焦点所在元素会收到，故在 window 捕获阶段全局记录 keydown/keyup，
+  // 供“Super+滚轮不透传”判断使用。
   const superKeyHeldRef = useRef(false);
+  // Win 键缓冲：按下先进缓冲不转发——本机(GNOME)用 Win+滚轮切工作区时，滚轮事件浏览器收不到、
+  // Win 的 keyup 也常被合成器吞掉，立即转发会让受控端 Win 卡在按下态弹出开始菜单。松开时按
+  // SUPER_TAP_MAX_MS 判定：短按补发“按下+抬起”（保留打开开始菜单），长按整键丢弃；
+  // 中途按下其他键则补发按下（Win+R 等组合键）；失焦/重新聚焦时清缓冲。
+  const superStateRef = useRef<SuperKeyBuffer | null>(null);
   const navigate = useNavigate();
   const controlRouteMatch = useMatch("/devices/:deviceId/control");
   const routeSelectedDeviceId = controlRouteMatch?.params.deviceId ?? "";
@@ -925,7 +939,6 @@ export function useRemoteControlController() {
   function handleRemoteStageWheel(event: WheelEvent<HTMLDivElement>) {
     if (!inputControlActive || !browserRemoteSession.current) return;
     // Super(Win)/Cmd + 滚轮是主控端本机的切换桌面快捷键，直接放行不透传给被控端。
-    // metaKey 在部分平台(Windows Chrome)的 wheel 事件上不可靠，需叠加本地 keydown/keyup 跟踪。
     // 页面滚动仍由 stage 上的非被动监听 lockPageScroll 拦截，不影响系统快捷键生效。
     if (event.metaKey || superKeyHeldRef.current) return;
     event.preventDefault();
@@ -951,15 +964,30 @@ export function useRemoteControlController() {
   function handleRemoteStageKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     // isComposing:本机输入法合成中不把候选键当普通按键(中文请用远端输入法或剪贴板粘贴)。
     if (!inputControlActive || !browserRemoteSession.current || event.nativeEvent.isComposing) return;
-    if (isSuperKey(event.key)) superKeyHeldRef.current = true;
     // Ctrl/Cmd+V 走“把本机剪贴板粘到远端”（onPaste 处理），不把 V 当普通按键发给远端，
     // 否则远端会再粘一次它自己的剪贴板。
     if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) return;
+    // Win 键缓冲：按下先进缓冲不转发，等组合键/松开时再判定（见 superStateRef 注释）。
+    if (isSuperKey(event.key)) {
+      if (!event.repeat) {
+        superStateRef.current = { phase: "pending", code: event.code, key: event.key, downAt: performance.now() };
+      }
+      return;
+    }
     const isHoldModifier = HOLD_MODIFIER_KEYS.has(event.key);
     if (isHoldModifier && event.repeat) return; // 修饰键已按住，忽略本机自动重复
     event.preventDefault();
     const value = toRemoteKeyValue(event);
     try {
+      // 缓冲中的 Win 因其他键按下而确认为远端组合键，补发 Win 按下（keyup 时释放），再发当前键。
+      const pendingSuper = superStateRef.current;
+      if (pendingSuper && pendingSuper.phase === "pending") {
+        superStateRef.current = { ...pendingSuper, phase: "flushed" };
+        browserRemoteSession.current.sendKeyboardInput({
+          action: "keyboardPress",
+          value: toAndroidKeyCodeFromDomEvent(pendingSuper),
+        });
+      }
       browserRemoteSession.current.sendKeyboardInput({ action: "keyboardPress", value });
       if (!isHoldModifier) {
         browserRemoteSession.current.sendKeyboardInput({ action: "keyboardRelease", value });
@@ -971,8 +999,33 @@ export function useRemoteControlController() {
 
   function handleRemoteStageKeyUp(event: KeyboardEvent<HTMLDivElement>) {
     if (!inputControlActive || !browserRemoteSession.current) return;
-    if (isSuperKey(event.key)) superKeyHeldRef.current = false;
     if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) return;
+    // Win 键松开：按缓冲状态与按住时长判定（见 superStateRef 注释）。
+    if (isSuperKey(event.key)) {
+      superKeyHeldRef.current = false;
+      const superState = superStateRef.current;
+      if (superState) {
+        superStateRef.current = null;
+        try {
+          if (superState.phase === "flushed") {
+            // 已因组合键补发过按下：正常释放。
+            browserRemoteSession.current.sendKeyboardInput({
+              action: "keyboardRelease",
+              value: toAndroidKeyCodeFromDomEvent(superState),
+            });
+          } else if (performance.now() - superState.downAt < SUPER_TAP_MAX_MS) {
+            // 短按单击：补发“按下+抬起”一次，受控端正常弹出开始菜单。
+            const value = toAndroidKeyCodeFromDomEvent(superState);
+            browserRemoteSession.current.sendKeyboardInput({ action: "keyboardPress", value });
+            browserRemoteSession.current.sendKeyboardInput({ action: "keyboardRelease", value });
+          }
+          // 长按后松开（多半是 Win+滚轮切桌面手势）：整键丢弃，不发任何事件。
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
+        return;
+      }
+    }
     // 只有修饰键是“按住”的，需在抬起时释放;普通键已在 keydown 即时抬起。
     if (!HOLD_MODIFIER_KEYS.has(event.key)) return;
     event.preventDefault();
@@ -987,7 +1040,8 @@ export function useRemoteControlController() {
     // 失焦时把按住的键鼠全部抬起：Alt+Tab、右键菜单、系统快捷键会吞掉 keyup/pointerup，
     // 否则会在被控端留下卡住的按键（右键卡死、Alt 卡死等）。
     activePointerId.current = null;
-    // Super 键的 keyup 可能被系统(如开始菜单)吞掉，失焦时一并复位本地跟踪状态。
+    // Win 缓冲直接丢弃；已补发按下的由 releaseAllInputs 统一释放。
+    superStateRef.current = null;
     superKeyHeldRef.current = false;
     browserRemoteSession.current?.releaseAllInputs();
   }
@@ -1300,6 +1354,39 @@ export function useRemoteControlController() {
     stage.addEventListener("wheel", lockPageScroll, { passive: false });
     return () => stage.removeEventListener("wheel", lockPageScroll);
   }, [inputControlActive]);
+
+  // 全局跟踪 Super(Win) 键（捕获阶段）：键盘事件只派发给焦点所在元素，焦点不在远控画面上时
+  // stage 的 onKeyDown 会漏掉 Win 键；且部分平台 wheel 事件的 metaKey 标志不可靠。
+  // window blur 时复位：Win 键的 keyup 可能被系统(如开始菜单/桌面切换)吞掉。
+  useEffect(() => {
+    // 注意：本文件中 KeyboardEvent 已被 React 类型遮蔽，全局监听需用 DOM 原生类型 globalThis.KeyboardEvent。
+    const markSuperDown = (event: globalThis.KeyboardEvent) => {
+      if (isSuperKey(event.key)) superKeyHeldRef.current = true;
+    };
+    const markSuperUp = (event: globalThis.KeyboardEvent) => {
+      if (isSuperKey(event.key)) superKeyHeldRef.current = false;
+    };
+    const resetSuperKey = () => {
+      superKeyHeldRef.current = false;
+    };
+    // 重新获得焦点时（如从其他工作区/窗口切回），清空 Win 缓冲并释放可能因失焦丢 keyup
+    // 而滞留在受控端的按键；无滞留时 releaseAllInputs 为空操作。
+    const releaseStaleInputs = () => {
+      superStateRef.current = null;
+      superKeyHeldRef.current = false;
+      browserRemoteSession.current?.releaseAllInputs();
+    };
+    window.addEventListener("keydown", markSuperDown, true);
+    window.addEventListener("keyup", markSuperUp, true);
+    window.addEventListener("blur", resetSuperKey);
+    window.addEventListener("focus", releaseStaleInputs);
+    return () => {
+      window.removeEventListener("keydown", markSuperDown, true);
+      window.removeEventListener("keyup", markSuperUp, true);
+      window.removeEventListener("blur", resetSuperKey);
+      window.removeEventListener("focus", releaseStaleInputs);
+    };
+  }, []);
 
   // 画面源信息：为每一路视频附上分辨率与是否有信号；hidden tile 的 videoWidth 依然是真实值，
   // 因此即使某路当前未显示，也能据此标注“无信号”。未采样到（刚连上）时按有信号处理，避免误报。
