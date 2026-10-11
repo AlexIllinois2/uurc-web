@@ -62,6 +62,8 @@ export interface BrowserRemoteDataChannel {
   label: string;
   readyState: RTCDataChannelState;
   binaryType?: BinaryType;
+  /** 已排队未对端 ACK 的字节数（SCTP 发送队列），用于输入发送背压保护。 */
+  bufferedAmount?: number;
   onopen: ((event: Event) => void) | null;
   onclose: ((event: Event) => void) | null;
   onerror: ((event: Event) => void) | null;
@@ -255,6 +257,10 @@ export class BrowserRemoteSession {
   private static readonly echoHeartbeatIntervalMs = 100;
   private static readonly echoHeartbeatDebugIntervalMs = 30000;
   private static readonly dataReceiveDebugIntervalMs = 30000;
+  // 控制通道发送队列背压阈值与告警间隔：超过即丢弃 mouse move（见 sendMouseMove）。
+  private static readonly maxControlBufferedAmount = 8 * 1024 * 1024;
+  private static readonly backpressureWarnIntervalMs = 30000;
+  private static readonly memorySampleIntervalMs = 10000;
 
   private readonly createPeerConnection: (configuration: RTCConfiguration) => BrowserRemotePeerConnection;
   private readonly getVideoCodecPreferences: () => RTCRtpCodec[];
@@ -280,6 +286,12 @@ export class BrowserRemoteSession {
   private sequence = 1;
   private readonly heldKeyboardValues = new Set<string | number>();
   private readonly heldMouseButtons = new Set<StreamerMouseButtonKind | number>();
+  // 内存泄露定位仪表：原生层异常增长（ontrack/ICE restart 风暴、发送队列积压）是
+  // JS 结构之外唯二能随操作/时间无界膨胀的来源，计数并在越限时打醒目告警。
+  private ontrackCount = 0;
+  private iceRestartCount = 0;
+  private lastBackpressureWarnAtMs = 0;
+  private memorySampleTimer: ReturnType<typeof setInterval> | null = null;
   private previousStatsSample:
     | {
         inboundVideo?: BrowserRemoteInboundVideoStats;
@@ -309,6 +321,34 @@ export class BrowserRemoteSession {
     return Math.floor(this.now() / 1000);
   }
 
+  // 内存采样仪表：每 10s 输出 JS 堆 + 发送队列 + 重协商计数。JS 堆持续增长说明泄露在
+  // JS 可达对象；JS 堆平稳而进程内存上涨则泄露在原生层（解码器/发送缓冲/GPU）。
+  private startMemorySampling(): void {
+    if (this.memorySampleTimer) return;
+    this.memorySampleTimer = setInterval(() => this.logMemorySample(), BrowserRemoteSession.memorySampleIntervalMs);
+  }
+
+  private stopMemorySampling(): void {
+    if (!this.memorySampleTimer) return;
+    clearInterval(this.memorySampleTimer);
+    this.memorySampleTimer = null;
+  }
+
+  private logMemorySample(): void {
+    const memory = (
+      performance as Performance & { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } }
+    ).memory;
+    const buffered = [...this.dataChannels.values()]
+      .map((channel) => `${channel.label}:${channel.bufferedAmount ?? 0}`)
+      .join(",");
+    const heap = memory
+      ? `jsHeap=${(memory.usedJSHeapSize / 1048576).toFixed(0)}MB total=${(memory.totalJSHeapSize / 1048576).toFixed(0)}MB`
+      : "jsHeap=N/A";
+    console.info(
+      `[uurc][mem] ${heap} channels{${buffered}} ontrack=${this.ontrackCount} iceRestart=${this.iceRestartCount} debugEvents=${this.debugEvents.length} stage=${this.state.stage}`,
+    );
+  }
+
   getState(): BrowserRemoteSessionState {
     return {
       ...this.state,
@@ -333,6 +373,7 @@ export class BrowserRemoteSession {
       iceId: this.iceId,
     });
     this.stopEchoHeartbeat();
+    this.stopMemorySampling();
     for (const channel of this.dataChannels.values()) {
       channel.onopen = null;
       channel.onclose = null;
@@ -358,6 +399,9 @@ export class BrowserRemoteSession {
     this.sequence = 1;
     this.heldKeyboardValues.clear();
     this.heldMouseButtons.clear();
+    this.ontrackCount = 0;
+    this.iceRestartCount = 0;
+    this.lastBackpressureWarnAtMs = 0;
     this.previousStatsSample = undefined;
     this.previousVideoElementSample = undefined;
     this.setState({
@@ -372,6 +416,7 @@ export class BrowserRemoteSession {
   }
 
   async start(input: BrowserRemoteSessionStartInput): Promise<BrowserRemoteSessionState> {
+    this.startMemorySampling();
     this.recordDebugEvent("session", "启动 signal control", {
       appControlId: input.appControlId,
       gzipSdp: input.gzipSdp ?? true,
@@ -503,6 +548,23 @@ export class BrowserRemoteSession {
   }
 
   sendMouseMove(input: BrowserRemoteMousePositionInput): void {
+    // 背压保护：SCTP 发送队列积压（对端未 ACK，如 relay 拥塞/重协商风暴）时丢弃移动输入。
+    // 移动天然可丢（最新位置很快覆盖旧值）；不丢弃的话 send 会在本地队列无界堆积，
+    // 这是唯一随“操作速度”线性增长的原生内存来源，涨到几个 G 后页面无响应。
+    const channel = this.dataChannels.get(STREAMER_DATA_CHANNEL_LABELS.control);
+    const bufferedAmount = channel?.bufferedAmount ?? 0;
+    if (channel && channel.readyState === "open" && bufferedAmount > BrowserRemoteSession.maxControlBufferedAmount) {
+      const now = this.now();
+      if (now - this.lastBackpressureWarnAtMs >= BrowserRemoteSession.backpressureWarnIntervalMs) {
+        this.lastBackpressureWarnAtMs = now || 1;
+        this.recordDebugEvent("data_send", "控制输入被背压丢弃", {
+          bufferedAmount,
+          targetPlatform: this.targetPlatform,
+        });
+        console.warn(`[uurc] 控制通道发送队列积压（bufferedAmount=${bufferedAmount}）→ 丢弃 mouse move 输入`);
+      }
+      return;
+    }
     this.sendInputData(this.buildMouseMoveAbsoluteInput(input));
   }
 
@@ -589,6 +651,11 @@ export class BrowserRemoteSession {
       sampledAtMs,
       selectedCandidatePair: selectedCandidatePair.pair,
     };
+    // 发送队列积压采样：数据通道排队字节是 JS 之外唯一随输入速率增长的原生缓冲。
+    const bufferedAmounts: Record<string, number> = {};
+    for (const [label, channel] of this.dataChannels) {
+      bufferedAmounts[label] = channel.bufferedAmount ?? 0;
+    }
     this.setState({
       ...this.state,
       connectionPath: selectedCandidatePair.connectionPath,
@@ -601,6 +668,9 @@ export class BrowserRemoteSession {
       delta: videoFlow.delta,
       inboundVideo,
       selectedCandidatePair: selectedCandidatePair.pair,
+      bufferedAmounts,
+      ontrackCount: this.ontrackCount,
+      iceRestartCount: this.iceRestartCount,
     });
     // 诊断：画面从“正常”转入停滞时打一条醒目日志，便于在浏览器控制台定位“卡死那一刻”的成因。
     if (
@@ -870,6 +940,15 @@ export class BrowserRemoteSession {
     if (notify.transportType !== undefined) {
       this.iceNetworkType = notify.transportType;
     }
+    this.iceRestartCount += 1;
+    // 正常会话切网通知应为个位数次；持续增长说明服务端在反复要求切网/重连，
+    // 每次 restart 都会重新 gather relay candidate 并触发后端信令风暴（candidate 刷屏）。
+    if (this.iceRestartCount > 4 && this.iceRestartCount % 4 === 0) {
+      console.warn(`[uurc] ICE restart 次数异常偏多（${this.iceRestartCount}）→ 疑似切网通知风暴`, {
+        transportType: notify.transportType,
+        iceId: notify.iceId ?? this.iceId,
+      });
+    }
     console.warn(
       `[uurc] 收到切网通知 → 发起 ICE restart（transportType=${notify.transportType ?? "?"}），画面可能短暂停滞`,
     );
@@ -894,6 +973,15 @@ export class BrowserRemoteSession {
   }
 
   private applyRemoteTrack(event: RTCTrackEvent): void {
+    this.ontrackCount += 1;
+    // 正常会话 ontrack 只有个位数次；持续增长说明被控端/服务端在反复重协商，
+    // 每次 ontrack 都会新建 track/MediaStream/video 解码器，是原生内存膨胀的典型来源。
+    if (this.ontrackCount > 12 && this.ontrackCount % 6 === 0) {
+      console.warn(`[uurc] ontrack 次数异常偏多（${this.ontrackCount}）→ 疑似重协商风暴，注意内存增长`, {
+        trackId: event.track.id,
+        remoteTrackCount: this.state.remoteTrackCount,
+      });
+    }
     const stream = this.remoteStream ?? createMediaStream() ?? event.streams[0];
     if (!stream) return;
     const tracks = typeof stream.getTracks === "function" ? stream.getTracks() : [];
