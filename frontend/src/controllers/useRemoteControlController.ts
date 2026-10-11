@@ -977,9 +977,10 @@ export function useRemoteControlController() {
   function handleRemoteStageKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     // isComposing:本机输入法合成中不把候选键当普通按键(中文请用远端输入法或剪贴板粘贴)。
     if (!inputControlActive || !browserRemoteSession.current || event.nativeEvent.isComposing) return;
-    // Ctrl/Cmd+V 走“把本机剪贴板粘到远端”（onPaste 处理），不把 V 当普通按键发给远端，
-    // 否则远端会再粘一次它自己的剪贴板。
-    if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) return;
+    // Ctrl/Cmd+V 忠实转发：远端粘贴它自己的剪贴板（文件剪切/复制粘贴都走远端剪贴板），
+    // 不把 V 当本地粘贴劫持，否则远端自己复制的内容永远粘不出来。
+    // Ctrl/Cmd+Shift+V 才走“把本机剪贴板文本打到远端”（onPaste 处理，V 不转发）。
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "v" || event.key === "V")) return;
     // Win 键缓冲：按下先进缓冲不转发，等组合键/松开时再判定（见 superStateRef 注释）。
     if (isSuperKey(event.key)) {
       if (!event.repeat) {
@@ -1012,7 +1013,7 @@ export function useRemoteControlController() {
 
   function handleRemoteStageKeyUp(event: KeyboardEvent<HTMLDivElement>) {
     if (!inputControlActive || !browserRemoteSession.current) return;
-    if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) return;
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "v" || event.key === "V")) return;
     // Win 键松开：按缓冲状态与按住时长判定（见 superStateRef 注释）。
     if (isSuperKey(event.key)) {
       superKeyHeldRef.current = false;
@@ -1060,8 +1061,10 @@ export function useRemoteControlController() {
   }
 
   function handleRemoteStagePaste(event: ClipboardEvent<HTMLDivElement>) {
-    // 直接粘贴：Ctrl/Cmd+V 时把本机剪贴板文本发到远端（无需打开剪贴板面板）。
+    // 仅 Ctrl/Cmd+Shift+V 时把本机剪贴板文本发到远端（无需打开剪贴板面板）；
+    // 纯 Ctrl+V 不进这里（V 已忠实转发，远端粘贴它自己的剪贴板）。
     if (!inputControlActive || !browserRemoteSession.current) return;
+    if (!event.shiftKey) return;
     const text = event.clipboardData?.getData("text") ?? "";
     if (!text) return;
     event.preventDefault();

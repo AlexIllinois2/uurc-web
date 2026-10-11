@@ -242,6 +242,14 @@ type SwitchNetworkNotify = {
   iceId?: string;
 };
 
+// 修饰键的键盘值：ANDROID_KEY_CODES_BY_DOM_CODE 中按住型修饰键的 Android keycode
+// （Alt=57/58、Shift=59/60、Ctrl=113/114、Meta/Win=117/118），
+// 外加 event.code 缺失时 toAndroidKeyCodeFromDomEvent 回退出的 key 字符串。
+const REMOTE_MODIFIER_KEY_VALUES = new Set<string | number>([
+  57, 58, 59, 60, 113, 114, 117, 118,
+  "Shift", "Control", "Alt", "Meta", "AltGraph",
+]);
+
 export class BrowserRemoteSession {
   private static readonly maxDebugEvents = 120;
   private static readonly echoHeartbeatIntervalMs = 100;
@@ -462,13 +470,29 @@ export class BrowserRemoteSession {
   //   TEXT_DATA_CHANNEL 上的 RomMsg_Text 二进制帧是安卓被控端协议，桌面端不解析，
   //   控制桌面时走文本通道会导致剪贴板“发送成功但被控端无反应”。
   // - 安卓/模拟器维持文本通道 RomMsg_Text。
+  //
+  // 发送前先释放当前按住的修饰键、发完再恢复：Ctrl+V 时本机已把 Ctrl 以“按住”转发给被控端，
+  // 而 text_input 是逐字符上屏（打字语义），被控端 Ctrl 尚未松开时每个字母都会变成
+  // Ctrl+字母（触发保存/剪切/打印等编辑器快捷键，安卓终端上则是乱码控制符）。
   sendClipboardText(text: string): void {
     if (!text) return;
-    if (isDesktopPlatform(this.targetPlatform)) {
-      this.sendTextInput(text);
-      return;
+    const heldModifiers = [...this.heldKeyboardValues].filter((value) => REMOTE_MODIFIER_KEY_VALUES.has(value));
+    for (const value of heldModifiers) this.sendKeyboardInput({ action: "keyboardRelease", value });
+    try {
+      if (isDesktopPlatform(this.targetPlatform)) {
+        this.sendTextInput(text);
+        return;
+      }
+      this.sendTextData(text);
+    } finally {
+      for (const value of heldModifiers) {
+        try {
+          this.sendKeyboardInput({ action: "keyboardPress", value });
+        } catch {
+          // 恢复失败忽略：通道已关闭时由重连/释放流程兜底。
+        }
+      }
     }
-    this.sendTextData(text);
   }
 
   sendMouseClick(input: BrowserRemoteMouseClickInput): void {
@@ -484,6 +508,18 @@ export class BrowserRemoteSession {
 
   sendMouseButton(input: BrowserRemoteMouseButtonInput): void {
     const button = input.button ?? "primary";
+    // 桌面被控端不响应 XBUTTON 侧键（back=8/forward=16，安卓触摸语义），
+    // 改发通用键盘等价物：资源管理器/浏览器中 Alt+Left/Right 即后退/前进。安卓保持原生侧键。
+    // 一次物理点击会先后来 press/release 两个事件，只在按下时合成一次，抬起事件忽略，否则走两步。
+    if (isDesktopPlatform(this.targetPlatform) && (button === "back" || button === "forward")) {
+      if (input.action !== "mousePress") return;
+      const arrow = button === "back" ? 21 : 22; // ArrowLeft / ArrowRight
+      this.sendKeyboardInput({ action: "keyboardPress", value: 57 }); // AltLeft
+      this.sendKeyboardInput({ action: "keyboardPress", value: arrow });
+      this.sendKeyboardInput({ action: "keyboardRelease", value: arrow });
+      this.sendKeyboardInput({ action: "keyboardRelease", value: 57 });
+      return;
+    }
     if (input.action === "mousePress") this.heldMouseButtons.add(button);
     else if (input.action === "mouseRelease") this.heldMouseButtons.delete(button);
     this.sendInputData(buildStreamerMouseButtonInputMessage({ action: input.action, button }));
