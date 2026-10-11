@@ -954,7 +954,11 @@ export function useRemoteControlController() {
     // Super(Win)/Cmd + 滚轮是主控端本机的切换桌面快捷键，直接放行不透传给被控端。
     // 页面滚动仍由 stage 上的非被动监听 lockPageScroll 拦截，不影响系统快捷键生效。
     if (event.metaKey || superKeyHeldRef.current) return;
-    event.preventDefault();
+    // 注意：React 的 onWheel 是被动监听，这里不能调 event.preventDefault()——
+    // 调了必然无效，且浏览器会对每个滚轮事件往控制台打一条带完整调用栈的
+    // "Unable to preventDefault inside passive event listener" 告警；惯性滚动时
+    // 每秒上百条，告警被控制台持有无法回收，足以把内存刷到几个 G 并饿死主线程。
+    // 页面滚动锁定由 stage 上的非被动原生监听 lockPageScroll（inputControlActive 时挂载）完成。
     try {
       // 浏览器 WheelEvent 正值=向下/向右滚动，而被控端 scroll 的 delta 正方向与之相反，
       // 这里取反后再发送，否则滚轮方向颠倒。
