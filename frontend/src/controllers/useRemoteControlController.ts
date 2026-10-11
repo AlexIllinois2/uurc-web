@@ -278,6 +278,19 @@ export function useRemoteControlController() {
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
 
+  // 全屏时启用 Keyboard Lock（虚拟机式“默认全给受控端”）：把 Esc、Ctrl+T/W/N 等浏览器自身
+  // 快捷键也交给远控页面转发。合成器/系统保留的快捷键（Alt+Tab、Super 系）浏览器无法抢占，
+  // 仍归主控端——这部分属“主控端例外”，需在系统侧改键。代价：全屏后 Esc 退出失效，用工具栏按钮退出。
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const keyboard = navigator.keyboard;
+    if (!keyboard) return;
+    void keyboard.lock().catch(() => {
+      // 不支持/非安全上下文时静默忽略，仅影响浏览器快捷键捕获，不影响远控本身。
+    });
+    return () => keyboard.unlock();
+  }, [isFullscreen]);
+
   useEffect(() => {
     const serverCount = remoteBootstrap?.signalServers.length ?? 0;
     if (serverCount > 0 && signalServerIndex >= serverCount) {
