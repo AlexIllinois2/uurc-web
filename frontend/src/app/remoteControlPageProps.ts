@@ -124,6 +124,7 @@ export interface RemoteControlPageProps {
   onRemoteVideoSourceChange: (videoId: string) => void;
   onRemoteVideoSample: (videoId: string, sample: BrowserRemoteVideoElementSample) => void;
   onReadLocalClipboard: () => void;
+  onRefreshPage: () => void;
   onReturnToDevices: () => void;
   onSdpTransportModeChange: (mode: SdpTransportMode) => void;
   onSignalServerIndexChange: (index: number) => void;

@@ -1193,6 +1193,8 @@ describe("App console", () => {
     // 进入全屏后才出现拖动手柄，并可把工具栏悬浮拖到画面内任意位置。
     await user.click(screen.getByRole("button", { name: "全屏" }));
     expect(requestFullscreen).toHaveBeenCalledTimes(1);
+    // 进入全屏后工具栏自动贴顶隐藏，只留半圆恢复按钮；点击恢复到原位后再拖动。
+    await user.click(await screen.findByRole("button", { name: "恢复工具栏" }));
     const dragHandle = await screen.findByRole("button", { name: "拖动工具栏" });
     vi.spyOn(toolbar.parentElement as HTMLElement, "getBoundingClientRect").mockReturnValue(
       rectFrom({ left: 0, top: 0, width: 900, height: 500 }),

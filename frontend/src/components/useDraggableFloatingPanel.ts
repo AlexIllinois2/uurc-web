@@ -17,8 +17,9 @@ type DockedState = {
   edge: DockedEdge;
   // 恢复按钮沿停靠边的偏移(半圆中心在该边上的坐标)。
   tabOffset: number;
-  // 隐藏前面板的位置与尺寸，恢复时按当前窗口大小重新钳制。
-  restore: FloatingPanelPosition;
+  // 隐藏前面板的位置与尺寸，恢复时按当前窗口大小重新钳制；
+  // restore 为 null 表示隐藏前未拖动过(进入全屏时自动贴顶)，恢复时回到 CSS 原位。
+  restore: FloatingPanelPosition | null;
   size: { width: number; height: number };
 };
 
@@ -57,12 +58,20 @@ export function useDraggableFloatingPanel<T extends HTMLElement>(enabled = true)
   const [position, setPosition] = useState<FloatingPanelPosition | null>(null);
   const [docked, setDocked] = useState<DockedState | null>(null);
 
-  // 关闭拖拽（如退出全屏）时清掉自定义坐标与停靠状态，让工具栏回到 CSS 中定义的固定原位。
+  // 关闭拖拽（如退出全屏）时清掉自定义坐标与停靠状态，让工具栏回到 CSS 中定义的固定原位；
+  // 开启拖拽（如进入全屏）时自动贴顶隐藏，避免面板遮挡画面，点击半圆恢复按钮回到原位。
   useEffect(() => {
     if (!enabled) {
       setPosition(null);
       setDocked(null);
+      return;
     }
+    setDocked({
+      edge: "top",
+      tabOffset: window.innerWidth / 2,
+      restore: null,
+      size: { width: 0, height: 0 },
+    });
   }, [enabled]);
 
   const panelStyle = useMemo<CSSProperties | undefined>(() => {
@@ -90,13 +99,16 @@ export function useDraggableFloatingPanel<T extends HTMLElement>(enabled = true)
 
   const restoreFromEdge = useCallback(() => {
     if (!docked) return;
-    const margin = 8;
-    const maxLeft = Math.max(margin, window.innerWidth - docked.size.width - margin);
-    const maxTop = Math.max(margin, window.innerHeight - docked.size.height - margin);
-    setPosition({
-      left: clamp(docked.restore.left, margin, maxLeft),
-      top: clamp(docked.restore.top, margin, maxTop),
-    });
+    // 进入全屏时自动贴顶隐藏没有隐藏前坐标，恢复即回到 CSS 原位（全屏下为顶部居中）。
+    if (docked.restore) {
+      const margin = 8;
+      const maxLeft = Math.max(margin, window.innerWidth - docked.size.width - margin);
+      const maxTop = Math.max(margin, window.innerHeight - docked.size.height - margin);
+      setPosition({
+        left: clamp(docked.restore.left, margin, maxLeft),
+        top: clamp(docked.restore.top, margin, maxTop),
+      });
+    }
     setDocked(null);
   }, [docked]);
 

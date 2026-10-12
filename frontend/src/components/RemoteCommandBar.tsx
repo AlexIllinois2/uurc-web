@@ -10,6 +10,7 @@ import {
   Maximize2,
   MousePointerClick,
   PlugZap,
+  RefreshCw,
   RotateCcw,
   Scan,
 } from "lucide-react";
@@ -27,6 +28,7 @@ export function RemoteCommandBar({
   nextAction,
   onNextAction,
   onReconnectRemote,
+  onRefreshPage,
   onRemoteShortcut,
   onStageViewModeChange,
   onToggleInputControl,
@@ -44,6 +46,7 @@ export function RemoteCommandBar({
   | "nextAction"
   | "onNextAction"
   | "onReconnectRemote"
+  | "onRefreshPage"
   | "onRemoteShortcut"
   | "onStageViewModeChange"
   | "onToggleInputControl"
@@ -53,7 +56,8 @@ export function RemoteCommandBar({
   | "remoteStageViewMode"
 >) {
   const nextStageMode = remoteStageViewMode === "fit" ? "fill" : "fit";
-  // 非全屏时工具栏固定在画面上方原位（不可拖动）；仅全屏时允许悬浮拖到画面内任意位置。
+  // 非全屏时工具栏固定在画面上方原位（不可拖动）；全屏时悬浮且可拖到画面内任意位置，
+  // 进入全屏时自动贴顶隐藏（点击半圆按钮恢复），避免面板遮挡画面。
   const { dragHandleProps, panelRef, panelStyle, dockedEdge, dockTabStyle, restoreFromEdge } =
     useDraggableFloatingPanel<HTMLElement>(isFullscreen);
   const connected = controlChannelState === "open";
@@ -113,6 +117,13 @@ export function RemoteCommandBar({
           )}
         </div>
         {!connected && nextAction.detail ? <p className="operation-note">{nextAction.detail}</p> : null}
+        {/* 面板中部：刷新页面。整页 reload 缓解内存泄漏，刷新后自动重连并借首次交互自动回全屏（面板随之隐藏）。 */}
+        <div className="command-action-group">
+          <button onClick={onRefreshPage} title="刷新页面（自动重连并回到全屏）" aria-label="刷新页面">
+            <RefreshCw size={17} />
+            刷新
+          </button>
+        </div>
         <div className="command-action-group command-action-tools" aria-label="远控工具栏">
           <button onClick={() => onStageViewModeChange(nextStageMode)}>
             <Scan size={17} />

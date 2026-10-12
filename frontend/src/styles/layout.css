@@ -174,7 +174,8 @@
   background: #000;
 }
 
-/* 全屏时命令栏悬浮在画面之上，不占布局、不挤压画面；拖动后由 inline 样式切到 fixed 定位。 */
+/* 全屏时命令栏悬浮在画面之上，不占布局、不挤压画面；拖动后由 inline 样式切到 fixed 定位。
+   进入全屏时命令栏先自动贴顶隐藏，点击半圆恢复按钮（未拖动过）即回到这里的原位。 */
 .control-stage-frame--fullscreen .control-command-bar {
   position: absolute;
   top: 16px;

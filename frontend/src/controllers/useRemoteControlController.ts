@@ -119,6 +119,21 @@ function readAutoConnectPref(): boolean {
   }
 }
 
+// “刷新页面自动恢复”标记：点击命令栏刷新按钮时写入，新页面加载后消费一次——
+// 自动重连，并在首次用户交互时自动回全屏（浮动面板随全屏自动贴顶隐藏）。
+// 用于反复刷新页面缓解内存泄漏的临时手段。sessionStorage 随标签页存续，重开页面不会误触发。
+const AUTO_RESTORE_AFTER_REFRESH_KEY = "uurc.autoRestoreAfterRefresh";
+
+function consumeAutoRestoreAfterRefreshFlag(): boolean {
+  try {
+    if (globalThis.sessionStorage?.getItem(AUTO_RESTORE_AFTER_REFRESH_KEY) !== "1") return false;
+    globalThis.sessionStorage.removeItem(AUTO_RESTORE_AFTER_REFRESH_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 把底层/协议级英文错误映射成用户能看懂、带“怎么办”的中文；未知错误原样返回。
 function toFriendlyError(message: string): string {
   const text = message || "";
@@ -181,6 +196,8 @@ export function useRemoteControlController() {
   const [sdpTransportMode, setSdpTransportMode] = useState<SdpTransportMode>("gzip");
   const [connectionRouteMode, setConnectionRouteMode] = useState<ConnectionRouteMode>("auto");
   const [autoConnect, setAutoConnect] = useState<boolean>(readAutoConnectPref);
+  // 刷新自动恢复：一次会话内消费一次 sessionStorage 标记，驱动自动重连与首次交互自动全屏。
+  const [autoRestoreAfterRefresh] = useState(consumeAutoRestoreAfterRefreshFlag);
   const [remoteStageViewMode, setRemoteStageViewMode] = useState<RemoteStageViewMode>("fit");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [signalServerIndex, setSignalServerIndex] = useState(0);
@@ -744,7 +761,7 @@ export function useRemoteControlController() {
     }
   }
 
-  async function handleNextAction() {
+  async function handleNextAction(forceTakeover = false) {
     if (busy !== null) return;
     if (!loggedIn) {
       setError("请先登录");
@@ -755,8 +772,9 @@ export function useRemoteControlController() {
       return;
     }
     if (!roomJoinedForSelectedDevice || roomRequiresTakeover || signalGatewayState === "error") {
-      // 自己上一个会话占用时直接接管（force），无需用户再点一次；他人占用仍保留显式两步。
-      const joinWithForce = roomRequiresTakeover || occupiedBySelfClient ? true : forceJoin;
+      // 自己上一个会话占用时直接接管（force），无需用户再点一次；他人占用仍保留显式两步；
+      // 刷新自动恢复流程（forceTakeover）无视占用者身份，旧会话多半是本页面上一次刷新留下的僵尸占用。
+      const joinWithForce = forceTakeover || roomRequiresTakeover || occupiedBySelfClient ? true : forceJoin;
       const nextContext = await joinRoomForDevice(selectedDeviceId, joinWithForce);
       if (!nextContext || (nextContext.occupiedAtJoin && !nextContext.forceJoin)) return;
       const status = await handleStartSignalGateway(nextContext);
@@ -876,10 +894,23 @@ export function useRemoteControlController() {
         void document.exitFullscreen?.();
         return;
       }
-      void target.requestFullscreen?.();
+      void target.requestFullscreen?.().catch(() => {
+        // 与“刷新自动恢复”的首次交互全屏可能产生并发请求，后者被拒时静默忽略。
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
+  }
+
+  function handleRefreshPage() {
+    // 写入“刷新后自动恢复”标记后整页刷新：新页面加载后自动重连，并在首次交互时自动回全屏
+    // （浮动面板随全屏自动贴顶隐藏）。用于反复刷新页面缓解内存泄漏的临时手段。
+    try {
+      globalThis.sessionStorage?.setItem(AUTO_RESTORE_AFTER_REFRESH_KEY, "1");
+    } catch {
+      // 忽略持久化失败（隐私模式等），退化为普通刷新。
+    }
+    window.location.reload();
   }
 
   function handleToggleInputControl() {
@@ -1298,6 +1329,9 @@ export function useRemoteControlController() {
     controlChannelOpenedRef.current = true;
     setInputControlEnabled(true);
     remoteStageRef.current?.focus();
+    // 连接成功后自动进入全屏（对包含命令栏的容器请求，与手动全屏一致）。
+    // requestFullscreen 受浏览器用户激活窗口限制：自动连接等无手势场景会被拒绝，静默保持非全屏，可手动点工具栏全屏按钮。
+    void remoteStageFrameRef.current?.requestFullscreen?.().catch(() => {});
   }, [controlChannelState]);
 
   useEffect(() => {
@@ -1315,11 +1349,14 @@ export function useRemoteControlController() {
       return;
     }
     if (
-      !autoConnect ||
+      // 刷新自动恢复时无视 autoConnect 偏好，保证刷新后必自动重连。
+      (!autoConnect && !autoRestoreAfterRefresh) ||
       !loggedIn ||
       !selectedDeviceId ||
       selectedDeviceIsCurrentAuthDevice ||
-      occupiedByOthers ||
+      // 刷新自动恢复时不被占用状态卡住：旧占用者是上次刷新留下的僵尸会话，handleNextAction
+      // 会以 forceTakeover 强制接管并连接；非刷新流程仍保留“他人占用需显式接管”的两步确认。
+      (occupiedByOthers && !autoRestoreAfterRefresh) ||
       busy !== null ||
       browserRemoteState.stage !== "idle" ||
       signalGatewayState === "connected" ||
@@ -1330,14 +1367,15 @@ export function useRemoteControlController() {
     ) {
       return;
     }
-    // 进入设备控制页后自动发起一次连接：他人占用已被 occupiedByOthers 排除；
-    // 若仅被自己上一个会话占用，handleNextAction 会自动接管（force join）。
+    // 进入设备控制页后自动发起一次连接：他人占用已被 occupiedByOthers 排除（刷新恢复流程除外，
+    // 会强制接管）；若仅被自己上一个会话占用，handleNextAction 也会自动接管（force join）。
     autoConnectAttemptedDeviceRef.current = selectedDeviceId;
-    void handleNextAction();
+    void handleNextAction(autoRestoreAfterRefresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handleNextAction 每次渲染重建，不入依赖；用 ref 保证每台设备只自动连一次
   }, [
     controlRouteMatch,
     autoConnect,
+    autoRestoreAfterRefresh,
     loggedIn,
     selectedDeviceId,
     selectedDeviceIsCurrentAuthDevice,
@@ -1349,6 +1387,25 @@ export function useRemoteControlController() {
     browserRemoteState.stage,
     signalGatewayState,
   ]);
+
+  // 刷新自动恢复：location.reload() 会丢失点击激活，连接成功时的自动全屏（见控制通道打开的副作用）
+  // 在无手势场景会被浏览器拒绝；退而求其次监听首次 pointerdown/keydown，借该手势自动回全屏，
+  // 浮动面板随全屏自动贴顶隐藏。若浏览器本身在全屏下刷新会恢复全屏，则此处静默跳过。仅生效一次。
+  useEffect(() => {
+    if (!autoRestoreAfterRefresh) return;
+    const requestFullscreenOnGesture = () => {
+      window.removeEventListener("pointerdown", requestFullscreenOnGesture, true);
+      window.removeEventListener("keydown", requestFullscreenOnGesture, true);
+      if (document.fullscreenElement) return;
+      void remoteStageFrameRef.current?.requestFullscreen?.().catch(() => {});
+    };
+    window.addEventListener("pointerdown", requestFullscreenOnGesture, true);
+    window.addEventListener("keydown", requestFullscreenOnGesture, true);
+    return () => {
+      window.removeEventListener("pointerdown", requestFullscreenOnGesture, true);
+      window.removeEventListener("keydown", requestFullscreenOnGesture, true);
+    };
+  }, [autoRestoreAfterRefresh]);
 
   useEffect(() => {
     const releaseHeldInputs = () => browserRemoteSession.current?.releaseAllInputs();
@@ -1586,6 +1643,7 @@ export function useRemoteControlController() {
     onRemoteVideoSourceChange: setSelectedRemoteVideoId,
     onRemoteVideoSample: handleRemoteVideoSample,
     onReadLocalClipboard: () => void handleReadLocalClipboard(),
+    onRefreshPage: handleRefreshPage,
     onReturnToDevices: () => void handleReturnToDevices(),
     onSdpTransportModeChange: setSdpTransportMode,
     onSignalServerIndexChange: setSignalServerIndex,
