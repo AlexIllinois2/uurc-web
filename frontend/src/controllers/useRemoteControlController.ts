@@ -124,6 +124,10 @@ function readAutoConnectPref(): boolean {
 // 用于反复刷新页面缓解内存泄漏的临时手段。sessionStorage 随标签页存续，重开页面不会误触发。
 const AUTO_RESTORE_AFTER_REFRESH_KEY = "uurc.autoRestoreAfterRefresh";
 
+// 连接成功后自动执行“刷新按钮”流程的周期：每 13 分钟整页 reload 一次（配合刷新自动恢复
+// 无感重连），周期性缓解长时间远控的内存泄漏。
+const AUTO_REFRESH_INTERVAL_MS = 13 * 60 * 1000;
+
 function consumeAutoRestoreAfterRefreshFlag(): boolean {
   try {
     if (globalThis.sessionStorage?.getItem(AUTO_RESTORE_AFTER_REFRESH_KEY) !== "1") return false;
@@ -1332,6 +1336,15 @@ export function useRemoteControlController() {
     // 连接成功后自动进入全屏（对包含命令栏的容器请求，与手动全屏一致）。
     // requestFullscreen 受浏览器用户激活窗口限制：自动连接等无手势场景会被拒绝，静默保持非全屏，可手动点工具栏全屏按钮。
     void remoteStageFrameRef.current?.requestFullscreen?.().catch(() => {});
+  }, [controlChannelState]);
+
+  // 连接成功后每 13 分钟自动执行一次“刷新按钮”流程：写入刷新自动恢复标记后整页 reload，
+  // 新页面借标记自动重连并回全屏。断开或卸载时清除定时器，重新连接成功后重新计时。
+  useEffect(() => {
+    if (controlChannelState !== "open") return;
+    const timer = window.setTimeout(handleRefreshPage, AUTO_REFRESH_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleRefreshPage 每次渲染重建且不依赖组件状态，入依赖会导致定时器被反复重置
   }, [controlChannelState]);
 
   useEffect(() => {
